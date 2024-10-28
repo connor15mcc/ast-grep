@@ -113,7 +113,7 @@ pub struct OutputArgs {
   /// or you can open text editor to tweak the matched code.
   /// Note that code rewrite only happens inside a session.
   #[clap(short, long)]
-  pub interactive: bool,
+  pub interactive: Option<bool>,
 
   /// Apply all rewrite without confirmation if true.
   #[clap(short = 'U', long)]
@@ -159,7 +159,10 @@ pub struct OutputArgs {
 impl OutputArgs {
   // either explicit interactive or implicit update_all
   pub fn needs_interactive(&self) -> bool {
-    self.interactive || self.update_all
+    if let Some(b) = self.interactive {
+      return b;
+    }
+    self.update_all || atty::is(atty::Stream::Stdout)
   }
 }
 
