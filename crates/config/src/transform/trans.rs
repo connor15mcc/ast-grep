@@ -116,19 +116,44 @@ pub struct Subcommand<T> {
 impl Subcommand<MetaVariable> {
   fn compute<D: Doc>(&self, ctx: &mut Ctx<'_, '_, D>) -> Option<String> {
     let text = get_text_from_env(&self.source, ctx)?;
-    let mut child = Command::new("sh")
+
+    let Ok(mut child) = Command::new("sh")
       .arg("-c")
       .arg(&self.command)
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .spawn()
-      // TODO: can we log the error somewhere?
-      .ok()?;
+      .inspect_err(|e| {
+        eprintln!("subcommand transformation failed to spawn: command='{}', error={}", self.command, e);
+      }) else {
+        return None;
+      };
 
-    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+    let Some(mut stdin) = child.stdin.take() else {
+      eprintln!("subcommand transformation failed to get stdin: command='{}'", self.command);
+      return None;
+    };
 
-    let out = child.wait_with_output().ok()?;
-    String::from_utf8(out.stdout).ok()
+    if let Err(e) = stdin.write_all(text.as_bytes()) {
+      eprintln!("subcommand transformation failed to write input: command='{}', error={}", self.command, e);
+      return None;
+    }
+
+    let Ok(out) = child.wait_with_output()
+      .inspect_err(|e| {
+        eprintln!("subcommand transformation failed to execute: command='{}', error={}", self.command, e);
+      }) else {
+        return None;
+      };
+
+    let Ok(result) = String::from_utf8(out.stdout)
+      .inspect_err(|e| {
+        eprintln!("subcommand transformation output is not valid UTF-8: command='{}', error={}", self.command, e);
+      }) else {
+        return None;
+      };
+
+    Some(result)
   }
 }
 
