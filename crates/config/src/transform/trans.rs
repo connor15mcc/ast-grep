@@ -1,3 +1,6 @@
+use std::io::Write;
+use std::process::{Command, Stdio};
+
 use super::rewrite::Rewrite;
 use super::{string_case, Ctx, TransformError};
 use ast_grep_core::meta_var::MetaVariable;
@@ -99,6 +102,36 @@ impl Convert<MetaVariable> {
   }
 }
 
+/// Converts the source meta variable's text content via piping the input through a subcommand.
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Subcommand<T> {
+  /// source meta variable to be transformed
+  pub source: T,
+  /// the command to convert `source`
+  /// must receive text input on STDIN, and print output to STDOUT.
+  pub command: String,
+}
+
+impl Subcommand<MetaVariable> {
+  fn compute<D: Doc>(&self, ctx: &mut Ctx<'_, '_, D>) -> Option<String> {
+    let text = get_text_from_env(&self.source, ctx)?;
+    let mut child = Command::new("sh")
+      .arg("-c")
+      .arg(&self.command)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .spawn()
+      // TODO: can we log the error somewhere?
+      .ok()?;
+
+    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+
+    let out = child.wait_with_output().ok()?;
+    String::from_utf8(out.stdout).ok()
+  }
+}
+
 /// Represents a transformation that can be applied to a matched AST node.
 /// Available transformations are `substring`, `replace` and `convert`.
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
@@ -108,6 +141,7 @@ pub enum Trans<T> {
   Replace(Replace<T>),
   Convert(Convert<T>),
   Rewrite(Rewrite<T>),
+  Subcommand(Subcommand<T>),
 }
 
 impl<T> Trans<T> {
@@ -118,6 +152,7 @@ impl<T> Trans<T> {
       T::Substring(s) => &s.source,
       T::Convert(c) => &c.source,
       T::Rewrite(r) => &r.source,
+      T::Subcommand(c) => &c.source,
     }
   }
 }
@@ -154,6 +189,10 @@ impl Trans<String> {
         separated_by: c.separated_by.clone(),
       }),
       T::Rewrite(r) => T::Rewrite(r.parse(lang)?),
+      T::Subcommand(c) => T::Subcommand(Subcommand {
+        source: parse_meta_var(&c.source, lang)?,
+        command: c.command.clone(),
+      }),
     })
   }
 }
@@ -179,6 +218,7 @@ impl Trans<MetaVariable> {
       T::Substring(s) => s.compute(ctx),
       T::Convert(c) => c.compute(ctx),
       T::Rewrite(r) => r.compute(ctx),
+      T::Subcommand(c) => c.compute(ctx),
     }
   }
 
@@ -189,6 +229,7 @@ impl Trans<MetaVariable> {
       T::Substring(_) => &[],
       T::Convert(_) => &[],
       T::Rewrite(r) => &r.rewriters,
+      T::Subcommand(_) => &[],
     }
   }
   pub fn used_vars(&self) -> &str {
@@ -458,6 +499,62 @@ if (true) {
     let tr = parse("{ substring: { source: $A } }")?;
     let actual = get_transformed(src, "let a = $A", &tr).ok_or(())?;
     assert_eq!(actual, expected);
+    Ok(())
+  }
+
+  #[test]
+  fn test_noop_subcommand() -> R {
+    let trans = parse(
+      r#"
+      subcommand:
+        source: "$A"
+        command: "cat"
+    "#,
+    )?;
+    let actual = get_transformed("let a = 123", "let a= $A", &trans).ok_or(())?;
+    assert_eq!(actual, "123");
+    Ok(())
+  }
+
+  #[test]
+  fn test_tr_subcommand() -> R {
+    let trans = parse(
+      r#"
+      subcommand:
+        source: "$A"
+        command: "tr '[:lower:]' '[:upper:]'"
+    "#,
+    )?;
+    let actual = get_transformed("let a = uppercase", "let a= $A", &trans).ok_or(())?;
+    assert_eq!(actual, "UPPERCASE");
+    Ok(())
+  }
+
+  #[test]
+  fn test_sed_subcommand() -> R {
+    let trans = parse(
+      r#"
+      subcommand:
+        source: "$A"
+        command: "sed 's/123/456/'"
+    "#,
+    )?;
+    let actual = get_transformed("let a = 123", "let a= $A", &trans).ok_or(())?;
+    assert_eq!(actual, "456");
+    Ok(())
+  }
+
+  #[test]
+  fn test_awk_subcommand() -> R {
+    let trans = parse(
+      r#"
+      subcommand:
+        source: "$A"
+        command: "awk '{printf $1+3}'"
+    "#,
+    )?;
+    let actual = get_transformed("let a = 123", "let a= $A", &trans).ok_or(())?;
+    assert_eq!(actual, "126");
     Ok(())
   }
 

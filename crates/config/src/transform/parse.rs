@@ -1,5 +1,5 @@
 use super::rewrite::Rewrite;
-use super::trans::{Convert, Replace, Substring};
+use super::trans::{Convert, Replace, Subcommand, Substring};
 use super::Trans;
 use serde_yaml::from_str as yaml_from_str;
 use std::str::FromStr;
@@ -29,6 +29,7 @@ impl FromStr for Trans<String> {
       "replace" => Trans::Replace(to_replace(decomposed)?),
       "substring" => Trans::Substring(to_substring(decomposed)?),
       "rewrite" => Trans::Rewrite(to_rewrite(decomposed)?),
+      "subcommand" => Trans::Subcommand(to_subcommand(decomposed)?),
       invalid => return Err(ParseTransError::InvalidTransform(invalid.to_string())),
     };
     Ok(trans)
@@ -153,6 +154,20 @@ fn to_rewrite(decomposed: DecomposedTransString) -> Result<Rewrite<String>, Pars
     join_by: join_by.map(yaml_from_str).transpose()?,
   })
 }
+fn to_subcommand(decomposed: DecomposedTransString) -> Result<Subcommand<String>, ParseTransError> {
+  let mut command = None;
+  for (key, value) in decomposed.args {
+    match key {
+      "command" => command = Some(value),
+      _ => return Err(ParseTransError::InvalidArg(key.to_string())),
+    }
+  }
+  let command = command.ok_or(ParseTransError::RequiredArg("command"))?;
+  Ok(Subcommand {
+    source: decomposed.source.to_string(),
+    command: dbg!(serde_yaml::from_str(command))?,
+  })
+}
 
 #[cfg(test)]
 mod test {
@@ -174,10 +189,17 @@ mod test {
   const REPLACE_CASE: &str = "replace($A, replace= ^.+, by=', ')";
   const CONVERT_CASE: &str = "convert($A, toCase=camelCase, separatedBy=[underscore, dash])";
   const REWRITE_CASE: &str = "rewrite($A, rewriters=[rule1, rule2], joinBy = ',,,,')";
+  const SUBCOMMAND_CASE: &str = "subcommand($A, command='cat | cat')";
 
   #[test]
   fn test_decompose_cases() {
-    let cases = [SUBSTRING_CASE, REPLACE_CASE, CONVERT_CASE, REWRITE_CASE];
+    let cases = [
+      SUBSTRING_CASE,
+      REPLACE_CASE,
+      CONVERT_CASE,
+      REWRITE_CASE,
+      SUBCOMMAND_CASE,
+    ];
     for case in cases {
       let decomposed = decompose_str(case).expect("should parse");
       match decomposed.func {
@@ -185,6 +207,7 @@ mod test {
         "replace" => assert_eq!(decomposed.args.len(), 2),
         "substring" => assert_eq!(decomposed.args.len(), 2),
         "rewrite" => assert_eq!(decomposed.args.len(), 2),
+        "subcommand" => assert_eq!(decomposed.args.len(), 1),
         _ => panic!("Unexpected function: {}", decomposed.func),
       }
     }
@@ -249,5 +272,15 @@ mod test {
       vec!["rule1".to_owned(), "rule2".to_owned()]
     );
     assert_eq!(rewrite.join_by, Some(",,,,".into()));
+  }
+
+  #[test]
+  fn test_parse_subcommand() {
+    let subcommand = Trans::from_str(SUBCOMMAND_CASE).expect("should parse subcommand");
+    let Trans::Subcommand(subcommand) = subcommand else {
+      panic!("Expected Subcommand transformation");
+    };
+    assert_eq!(subcommand.source, "$A");
+    assert_eq!(subcommand.command, "cat | cat");
   }
 }
